@@ -8,21 +8,36 @@
 
 ---
 
-## ⚠️ 先读：两个硬约束
+## 版本与登录
 
-这两条不搞清楚，装完也用不起来。
+### 支持的微信版本
 
-**1. 微信版本被锁死在 3.9.5.81**
+`wxhook` 上游已经覆盖 **3.9.x 到 4.1.x**，最新支持到 4.1.15.56。各版本安装包在这里下载：
 
-PyPI 上的 `wxhook` 只有 `0.0.10`，源码里写死 `self.version = "3.9.5.81"`。微信 4.x 的 `Weixin.exe` 它认不出来。
+- [tom-snow/wechat-windows-versions](https://github.com/tom-snow/wechat-windows-versions/releases) —— 含 [WeChat 3.9.5.81](https://github.com/tom-snow/wechat-windows-versions/releases/download/v3.9.5.81/WeChatSetup-3.9.5.81.exe)
+- 本仓库的适配层**实测跑通的是 3.9.5.81**；4.x 理论上可用，未验证，欢迎贴日志
 
-**2. 2026-10 起，新设备扫码登录会被服务端拒绝**
+**装完第一件事：关掉自动升级。** 3.9.x 会自己升到 4.x，升上去就白装了：
 
-腾讯对 3.9.x 老客户端加了服务端版本门禁：**已建立会话的恢复登录**（免扫码）通常还能进，**重新扫码**会被回「当前客户端版本过低」。
+1. 登录后 → 设置 → 通用设置 → 取消「有更新时自动升级微信」
+2. 把安装目录里的 `WeChatUpdate.exe` 改名成 `WeChatUpdate.exe.bak`
+3. `reg add "HKCU\Software\Tencent\WeChat" /v NeedUpdateType /t reg_dword /d 0 /f`
 
-这是服务端行为，本地改不了。版本伪装、逐处内存补丁都试过，无效（详见 [`docs/设计说明.md`](docs/设计说明.md)）。
+### 提示「当前客户端版本过低」
 
-**结论**：本项目当前适合「手上已经有一个能登录的 3.9.5.81 会话」的人。从零开始、微信已经是 4.x 的，直接看 [微信 4.x 怎么办](#微信-4x-怎么办)。
+腾讯对老客户端加了服务端版本门禁。社区的做法是**在扫码前**给微信进程打一个 `x64 → x32` 的内存补丁，再配合特定的扫码顺序：
+
+1. 把 `config.json` 的 `patch_x64_to_x32` 改成 `true`
+2. 启动 `start.bat`，微信会停在扫码界面（补丁在进程启动时打一次）
+3. 手机扫码 → **先不要点确认**
+4. 再扫一次
+5. 点确认登录
+
+补丁的来源是 [alingalingling/Astrbot-wechat-bot-](https://github.com/alingalingling/Astrbot-wechat-bot-) 里的 `wechat_patcher.py`；本仓库的 `patch_audit.py` 是它的审计加强版。
+
+登录成功后**把 `patch_x64_to_x32` 改回 `false`**：补丁只在进程启动时执行一次，之后的会话恢复不需要它，而带着补丁跑大约每小时会崩一次（[设计说明 §7](docs/设计说明.md#7-关于-x64--x32-内存补丁)）。
+
+> 成功率随腾讯策略变化，不是每次都过；过不去就等几天再试。
 
 ---
 
@@ -63,10 +78,6 @@ AstrBot  aiocqhttp 适配器（:11229）
 | 发 · 图片 | ✅ | base64 内嵌，单帧上限 64 MiB |
 | 发 · 文件 / 音频 | ✅ | `record` 段降级成文件（微信里点开照样能播） |
 | 发 · GIF 表情 | ✅ | 走 `sendCustomEmotion`，GIF 才是动的 |
-| 发 · 语音气泡 | ❌ | `wxhook 0.0.10` 没有 `send_voice` |
-| 收 · 语音消息 | ❌ | 未订阅 |
-| 朋友圈 / 视频号 / 加好友 / 群管理 | ❌ | 属于协议层能力，注入层没有 |
-| 撤回 / 拍一拍 | ❌ | 未实现 |
 | 小程序 / 链接 / 转账卡片 | ⚠️ | 只记一条日志，不解析 |
 
 **群聊策略**：所有群消息都会推给 AstrBot（供群聊上下文记录「群友在聊什么」），但只有 **@ 了机器人** 的那条才带 `at` 段、才会触发回复。也就是「看得见，不插嘴」。
@@ -78,14 +89,14 @@ AstrBot  aiocqhttp 适配器（:11229）
 ### 前置条件
 
 - Windows 10 / 11，x64
-- 微信 **3.9.5.81**，且有个能正常登录的小号
+- 微信 **3.9.5.81**（[下载](https://github.com/tom-snow/wechat-windows-versions/releases/download/v3.9.5.81/WeChatSetup-3.9.5.81.exe)），且有个能正常登录的小号
 - 已安装并运行 [AstrBot](https://astrbot.app/)，并在里面建好 `aiocqhttp` 适配器（默认端口 11229）
 - [uv](https://docs.astral.sh/uv/)（`start.bat` 用它拉起依赖）
 
 ### 步骤
 
 ```bat
-git clone https://github.com/<your-name>/wxhook-ob11-bridge.git
+git clone https://github.com/Sikadi520/wxhook-ob11-bridge.git
 cd wxhook-ob11-bridge
 copy config.example.json config.json
 ```
@@ -132,7 +143,7 @@ copy config.example.json config.json
 
 | 现象 | 原因 / 处理 |
 | --- | --- |
-| 提示「当前客户端版本过低」 | 服务端门禁，本地无解。见开头第 2 条 |
+| 提示「当前客户端版本过低」 | 服务端门禁。按 [版本与登录](#提示当前客户端版本过低) 的补丁 + 扫码顺序处理 |
 | 群里 `/签到` 之类指令没反应 | `bot_nicknames` 没配，@ 前缀没被剥掉。见 [`docs/设计说明.md`](docs/设计说明.md#1-群里的--分隔符不是空格) |
 | 群里 @ 别人它也回 | 老版本靠文本猜。本仓库用 `atuserlist` 判定，确认你在用最新代码 |
 | `WinError 10043` / 一条消息都收不到 | 上次的注入进程占着 18999，`main.py` 启动时会自动清理 |
@@ -145,17 +156,21 @@ copy config.example.json config.json
 
 ---
 
-## 微信 4.x 怎么办
+## 微信 4.x
 
-上游 `miloira/wxhook` 的 GitHub 版本已经支持微信 **4.1.15.50**（以及 3.9.12.51）。但本项目是按 `0.0.10` 的 API 写的（`Bot(...)`、`send_text`、`download_attachment`、`send_emotion`），换版本后适配层大概率要改，**未做验证**。
-
-想试：
+上游 `miloira/wxhook` 已支持到 **4.1.15.56**，但 PyPI 上的 `0.0.10` 只认 3.9.5.81。想上 4.x，把依赖换成 GitHub 版：
 
 ```bat
-uv run --with "wxhook @ git+https://github.com/miloira/wxhook" python main.py
+uv run --with "wxhook @ git+https://github.com/miloira/wxhook" --with websockets python main.py
 ```
 
-欢迎开 issue 贴日志，或者直接 PR 兼容层。
+或者直接写进 `requirements.txt`：
+
+```text
+wxhook @ git+https://github.com/miloira/wxhook
+```
+
+本仓库的适配层是按 `0.0.10` 的 API 写的（`Bot(...)`、`send_text`、`download_attachment`、`send_emotion`），4.x 下这些调用是否完全一致**没有验证过**。跑通或跑不通都欢迎开 issue 贴日志。
 
 ---
 
@@ -174,7 +189,7 @@ uv run --with "wxhook @ git+https://github.com/miloira/wxhook" python main.py
 ## 风险与免责
 
 - **封号风险**：DLL 注入违反微信用户协议，用小号，别用主号。
-- **版本锁死**：微信一升级，整套失效。
+- **版本兼容**：上游支持 3.9.x–4.1.x，本仓库实测 3.9.5.81；大版本升级仍可能需要改适配层。
 - **需要管理员权限**：注入 DLL 必须提权。
 - **重启 = 重来**：重启电脑后要重新跑 `start.bat`（会话还在的话不用重新扫码）。
 - **AstrBot agent 权限很大**：开了 shell / python 工具时，`allowed_wxids` 不能留空。

@@ -1,6 +1,7 @@
 # 核心依赖
-# wxhook 0.0.10 是 PyPI 上的最后一个版本,只支持微信 3.9.5.81。
-# 想试微信 4.x 请改从 GitHub 安装,见 README「微信 4.x」一节。
+# PyPI 上的 wxhook 停在 0.0.10,只认微信 3.9.5.81。
+# 想用 4.x,把下面这行换成 GitHub 版(见 README「微信 4.x」):
+#   wxhook @ git+https://github.com/miloira/wxhook
 wxhook==0.0.10
 websockets>=12,<16
 
