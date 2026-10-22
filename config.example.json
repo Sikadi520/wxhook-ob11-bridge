@@ -1,0 +1,22 @@
+{
+  "astrbot_ob_url": "ws://127.0.0.1:11229/ws",
+  "ws_max_size": 67108864,
+
+  "faked_version": "3.9.12.51",
+  "patch_x64_to_x32": false,
+  "patch_max_sites": 999,
+
+  "self_wxid": "",
+  "allowed_wxids": [],
+  "bot_nicknames": ["小助手"],
+
+  "buffer_seconds": 2,
+  "image_buffer_seconds": 10,
+  "group_image_reply": true,
+  "send_interval": 0.3,
+  "image_wait_seconds": 8,
+  "send_file_keep_seconds": 1800,
+  "gif_as_emotion": true,
+  "gif_emotion_max_mb": 5,
+  "log_level": "INFO"
+}

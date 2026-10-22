@@ -1,0 +1,7 @@
+* text=auto eol=lf
+
+# Windows 批处理必须原样保存 CRLF:用 -text 关掉换行归一化,
+# 这样 git clone 和 GitHub 的 "Download ZIP" 拿到的是同一份 CRLF 文件。
+# (用 `text eol=crlf` 的话仓库里存的是 LF,ZIP 下载出来就是 LF,cmd 解析 if 块会出问题)
+*.bat -text
+*.cmd -text

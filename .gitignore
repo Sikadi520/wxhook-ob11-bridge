@@ -1,0 +1,23 @@
+# ---- 运行时产物:绝对不能提交 ----
+config.json
+wxid_map.json
+ready.json
+logs/
+*.log
+patch_audit/
+patch_candidates.log
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.uv/
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
