@@ -199,6 +199,27 @@ def _doctor(cfg: dict = None) -> int:
     if pids:
         warnings.append("微信正在运行,启动前会被结束再接管")
 
+    # 4.5) 升级封锁状态 —— 比版本对不对更早预警
+    print("\n[防升级封锁]")
+    try:
+        block = wv.check_blockade(info.get("install_dir") or "")
+        for target in block["targets"]:
+            mark = "✓ 已封" if target["denied"] else "✗ 未封"
+            print("  %-8s %s" % (mark, target["path"]))
+        if block["denied"] == 0:
+            print("  提示    : 未检测到封锁。微信会在后台把自己升掉(重装只能撑 5–12 分钟)")
+            warnings.append(
+                "没有防升级封锁 —— 微信随时可能被升到 3.9.12.x,之后 bridge 就起不来了。"
+                "封锁命令见 README「微信会静默把自己升级掉」")
+        elif not block["ok"]:
+            warnings.append(
+                "封锁不完整(%d/%d):其中最关键的安装目录没封上时,升级照样会发生"
+                % (block["denied"], len(block["targets"])))
+        else:
+            print("  -> 三处都已封锁,升级会被拦住")
+    except Exception as exc:
+        print("  检测失败: %s" % exc)
+
     # 5) AstrBot 端口
     print("\n[AstrBot]")
     raw = cfg.get("astrbot_ob_url") or "ws://127.0.0.1/ws"

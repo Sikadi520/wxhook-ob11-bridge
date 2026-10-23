@@ -232,6 +232,37 @@ class RecoverHintTest(unittest.TestCase):
         self.assertIn("3.9.5.81", wv.recover_hint())
         self.assertNotIn("{supported}", wv.recover_hint())
 
+    def test_username_braced_not_colon(self):
+        """
+        回归:必须写 ``${env:USERNAME}:(WD,AD,DC)``。
+
+        写成 ``"$env:USERNAME:(WD,AD,DC)"`` 的话,PowerShell 会把冒号当成
+        变量名的一部分(``$env:USERNAME:``),展开后只剩 ``(WD,AD,DC)``,
+        icacls 直接报 ``无效参数 "(WD,AD,DC)"``。
+
+        2026-10-23 用户就是照着我给的写法粘贴的,三条全部报错。
+        """
+        text = wv.recover_hint()
+        self.assertIn("${env:USERNAME}:(WD,AD,DC)", text)
+        # 裸写法不能再出现在可复制的命令里(只在"不要这么写"的告诫行里允许)
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("icacls") or stripped.startswith("$deny"):
+                self.assertNotIn("$env:USERNAME:", stripped,
+                                 "可复制命令行里不能出现 $env:USERNAME:")
+
+    def test_states_what_the_blockade_actually_blocks(self):
+        """实测结论要写清楚:改名/建目录能拦,删文件拦不住。"""
+        text = wv.recover_hint()
+        self.assertIn("改名", text)
+        self.assertIn("删除", text)
+        self.assertIn("DELETE_CHILD", text,
+                      "要说清楚为什么删不掉,否则下次还会误以为全挡住了")
+
+    def test_never_claims_delete_is_blocked(self):
+        """旧的错误说法不能再出现。"""
+        self.assertNotIn("只挡写不挡删", wv.recover_hint())
+
 
 def _load_wechat():
     wxhook = types.ModuleType("wxhook")

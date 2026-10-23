@@ -58,19 +58,41 @@ Exception: unknown error
 
 #### 真正能做的
 
-**硬封三处写入点**（管理员 PowerShell，**先完全退出微信**）：
+**硬封三处写入点**（**必须用「以管理员身份运行」的 PowerShell**，先完全退出微信）：
 
 ```powershell
-$deny = "$env:USERNAME:(WD,AD,DC)"     # 写文件 / 建子目录 / 删子项
-icacls 'C:\WeChat'                              /deny $deny /T /C
-icacls 'C:\ProgramData\Tencent\WeChat'          /deny $deny /T /C
-icacls "$env:APPDATA\Tencent\WeChat\XPlugin"    /deny $deny /T /C
+$deny = "${env:USERNAME}:(WD,AD,DC)"
+icacls 'D:\WeChat'                             /deny $deny /T /C
+icacls 'C:\ProgramData\Tencent\WeChat'         /deny $deny /T /C
+icacls "$env:APPDATA\Tencent\WeChat\XPlugin"   /deny $deny /T /C
 ```
 
-- **`DC`（删除子项）必须一起拒** —— 只挡写不挡删，`[3.9.5.81]` 照样会被删掉换新
-- 上面的 `C:\WeChat` 换成你的**实际安装目录**（微信装 D 盘就写 `D:\WeChat`）
+**两个必踩的坑**（都是实际踩到的）：
+
+| 坑 | 现象 | 正确做法 |
+| --- | --- | --- |
+| 没用管理员窗口 | `Access is denied` / `Failed processing N files`，而且**只部分生效**（`%APPDATA%` 那个会成，安装目录不会） | 标题栏必须显示「管理员」 |
+| `$env:USERNAME:` 被吃掉 | `无效参数 "(WD,AD,DC)"` | 写 **`${env:USERNAME}`**（带大括号） |
+
+> 第一个坑特别阴：安装目录 owned by `BUILTIN\Administrators`，非管理员改不了 ACL，
+> 而 `%APPDATA%\...\XPlugin` 在你的用户目录里，**能改** —— 于是看起来“部分成功”，
+> 实际最关键的那两处没盖上。
+
+- 上面的 `D:\WeChat` 换成你的**实际安装目录**（用 `--doctor` 能看到）
 - 副作用：微信可能在「检查更新」时报错，忽略即可；卸载/重装前要先解除
-- 解除：`icacls <路径> /remove:d "$env:USERNAME" /T /C`
+- 解除：`icacls <路径> /remove:d $env:USERNAME /T /C`（同样要管理员）
+
+**这个封锁到底能挡什么**（2026-10-23 实测，比网传说法更精确）：
+
+| 操作 | 结果 |
+| --- | --- |
+| 写新文件 | ✓ 拒绝 |
+| 在安装目录新建 `[3.9.12.55]` / `_tmp` | ✓ 拒绝 |
+| **改名/顶替已有版本目录** | ✓ 拒绝 ← **升级真正的那一步** |
+| 删除已存在的文件 | ✗ 仍会成功 |
+
+删除挡不住是因为 DENY 只加在对象自身，而删除权限来自父目录的 `DELETE_CHILD`。
+影响不大：文件删了也没办法在封锁目录里重建，微信就起不来。
 
 **桥接侧的兜底**：v0.2.1 起 `start.bat` 启动前会跑 `--doctor`，直接对比
 注册表版本，不对就停住并打印恢复步骤，不会再让你等着看 `unknown error`。

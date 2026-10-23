@@ -334,6 +334,130 @@ def version_ok(info: dict) -> bool:
     return info.get("version") == SUPPORTED_VERSION
 
 
+# --------------------------------------------------------------------------
+# 防升级封锁检测
+# --------------------------------------------------------------------------
+
+BLOCK_TARGETS = ("install", "programdata", "xplugin")
+
+
+def _default_targets(install_dir: str):
+    appdata = os.environ.get("APPDATA") or ""
+    return {
+        "install": install_dir or "",
+        "programdata": r"C:\ProgramData\Tencent\WeChat",
+        "xplugin": os.path.join(appdata, "Tencent", "WeChat", "XPlugin") if appdata else "",
+    }
+
+
+def _has_deny_ace(path: Path) -> bool:
+    """
+    看一个路径自己身上有没有 DENY 条目。
+
+    用 ctypes 读 DACL,而不是调 PowerShell:
+      * 不依赖语言环境(中文 icacls 输出是「已成功处理」,解析起来脆弱);
+      * 快,doctor 要在 1 秒内跑完。
+
+    ## 两个容易写错的地方
+
+    1. **ACE 类型常量**。WinNT.h 里:
+           ACCESS_ALLOWED_ACE_TYPE = 0
+           ACCESS_DENIED_ACE_TYPE  = 1
+       不是 3(3 是 SYSTEM_AUDIT)。写错就永远找不到 DENY。
+
+    2. **ACL 头部布局**。真实内存是:
+
+           offset 0  AclRevision (1)
+           offset 1  Sbz1        (1)
+           offset 2  AclSize     (2)
+           offset 4  AceCount    (2)
+           offset 6  Sbz2        (2)
+           offset 8  第一个 ACE
+
+       这里直接用字节偏移(ACL_HEADER_SIZE = 8)。
+
+    > 曾经怀疑过 ``ctypes.Structure`` 的 2 字节对齐会把 AceCount 推到
+    > offset 6,导致漏读 DENY —— 实测证明偏移是对的(就是 4),
+    > 真正那次“明明封了却报未封”是探测时 DENY 还没落盘。
+    > 不再依赖对齐细节,直接按字节读。
+    """
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+    except Exception:
+        return False
+    try:
+        advapi = ctypes.windll.advapi32
+        kernel = ctypes.windll.kernel32
+    except Exception:
+        return False
+
+    SE_FILE_OBJECT = 1
+    DACL_SECURITY_INFORMATION = 0x4
+    ERROR_SUCCESS = 0
+    ACCESS_DENIED_ACE_TYPE = 1
+    ACL_HEADER_SIZE = 8        # 不要用 sizeof(结构体),见上面的注释
+
+    def _u8(addr, off=0):
+        return ctypes.cast(addr + off, ctypes.POINTER(ctypes.c_ubyte))[0]
+
+    def _u16(addr, off=0):
+        return ctypes.cast(addr + off, ctypes.POINTER(ctypes.c_ushort))[0]
+
+    pdacl = ctypes.c_void_p()
+    psd = ctypes.c_void_p()
+    try:
+        rc = advapi.GetNamedSecurityInfoW(
+            ctypes.c_wchar_p(str(path)), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+            None, None, ctypes.byref(pdacl), None, ctypes.byref(psd))
+        if rc != ERROR_SUCCESS or not pdacl.value:
+            return False
+        base = pdacl.value
+        count = _u16(base, 4)          # AceCount
+        addr = base + ACL_HEADER_SIZE
+        for _ in range(count):
+            ace_type = _u8(addr, 0)
+            ace_size = _u16(addr, 2)
+            if ace_type == ACCESS_DENIED_ACE_TYPE:
+                return True
+            if ace_size <= 0:
+                break
+            addr += ace_size
+        return False
+    except Exception:
+        return False
+    finally:
+        try:
+            if psd.value:
+                kernel.LocalFree(psd)
+        except Exception:
+            pass
+
+
+def check_blockade(install_dir: str = "") -> dict:
+    """
+    检查三处升级写入点是否都被 DENY 封住。
+
+    返回 ``{"ok": bool, "denied": int, "targets": [{key,path,exists,denied}]}``。
+
+    只读,不改任何权限。注意:**安装目录那一处最关键** —— 腾讯的升级
+    最终动作是在安装目录里建 `[新版本]_tmp` 并改名顶替。
+    """
+    paths = _default_targets(install_dir)
+    targets = []
+    for key in BLOCK_TARGETS:
+        raw = paths.get(key) or ""
+        p = Path(raw) if raw else None
+        exists = bool(p and p.is_dir())
+        targets.append({"key": key, "path": raw, "exists": exists,
+                        "denied": bool(exists and _has_deny_ace(p))})
+    denied = sum(1 for t in targets if t["denied"])
+    existing = [t for t in targets if t["exists"]]
+    ok = bool(existing) and all(t["denied"] for t in existing)
+    return {"ok": ok, "denied": denied, "targets": targets}
+
+
 def doctor_report() -> dict:
     """
     `--doctor` 用的一份汇总。全是只读检查。
@@ -358,16 +482,32 @@ RECOVER_STEPS = """\
   2) 卸掉当前版本,重装 {supported}:
        https://github.com/tom-snow/wechat-windows-versions/releases/download/v3.9.5.81/WeChatSetup-3.9.5.81.exe
   3) 装完先做一次封锁(**重装只能撑 5–12 分钟,不封锁等于白装**):
-       管理员 PowerShell,把下面三处全部拒绝写入/删除:
+       管理员 PowerShell,逐行粘贴:
 
-       $deny = "$env:USERNAME:(WD,AD,DC)"
+       $deny = "${env:USERNAME}:(WD,AD,DC)"
        icacls 'C:\\WeChat'                           /deny $deny /T /C
        icacls 'C:\\ProgramData\\Tencent\\WeChat'     /deny $deny /T /C
        icacls "$env:APPDATA\\Tencent\\WeChat\\XPlugin" /deny $deny /T /C
 
        ↑ 路径以你的实际安装目录为准(见下面"安装目录")。
-       ↑ DC(删除子项)必须一起拒,只挡写不挡删照样会被换掉。
+
+       ⚠ 两个必踩的坑(都实测过):
+         (a) 必须用【以管理员身份运行】的 PowerShell。
+             普通窗口下安装目录是 BUILTIN\\Administrators 所有,
+             会报 ``Access is denied`` / ``Failed processing N files``。
+         (b) 引号里写 ${env:USERNAME},不能写 $env:USERNAME:
+             ``"$env:USERNAME:(WD,AD,DC)"`` 展开后只剩 ``(WD,AD,DC)``,
+             icacls 报 ``无效参数``。
+
   4) 重新跑 start.bat
+
+封锁实际能挡什么(2026-10-23 实测):
+    ✓ 写新文件
+    ✓ 在安装目录里新建 [3.9.12.55] / [3.9.12.55]_tmp
+    ✓ 改名/顶替已有版本目录        <- 升级真正的那一步
+    ✗ 删除已存在的文件(仍可删)—— DENY 只加在对象自身,
+      删除权限来自父目录的 DELETE_CHILD。影响不大:删了文件也无法
+      在封锁目录里重建,微信就起不来了。
 
 关于网上流传的"防升级三步"——**全都不要用了**:
     x 取消「有更新时自动升级微信」 只是客户端偏好,拦不住热更新链路
