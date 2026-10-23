@@ -21,3 +21,6 @@ venv/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# DSH 文件工具留下的锁文件(空文件),别提交
+.dsh-ops-update-*.lock

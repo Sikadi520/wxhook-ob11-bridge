@@ -17,6 +17,16 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
+
+    # 断言和 docstring 里全是中文。Windows runner 的控制台默认 cp1252,
+    # unittest 每跑一条就要 print 一遍测试的首行 docstring,
+    # 于是断言全过、进程倒在 print 上:
+    #   UnicodeEncodeError: 'charmap' codec can't encode characters ...
+    # 2026-10-23 的 run #1 就是这么红的(见 windows 那份日志的末尾)。
+    env:
+      PYTHONIOENCODING: utf-8
+      PYTHONUTF8: "1"
+
     steps:
       - uses: actions/checkout@v4
 
@@ -25,36 +35,12 @@ jobs:
       - name: set up python
         run: uv python install 3.12
 
-      # 把最关键的一条单独拎出来,失败信息才看得懂
-      - name: bat must be CRLF in git
-        shell: python
-        run: |
-          import subprocess
-          import sys
-
-          files = subprocess.run(
-              ["git", "ls-files", "*.bat", "*.cmd"],
-              capture_output=True, text=True, check=True).stdout.split()
-
-          failed = []
-          for path in files:
-              blob = subprocess.run(["git", "cat-file", "-p", ":" + path],
-                                    capture_output=True, check=True).stdout
-              lf = blob.count(b"\n")
-              crlf = blob.count(b"\r\n")
-              stray = lf - crlf
-              if stray:
-                  failed.append((path, stray, lf))
-                  print("FAIL: %s 有 %d 个孤立 LF(共 %d 行)" % (path, stray, lf))
-              else:
-                  print("OK: %s 为纯 CRLF(%d 行)" % (path, lf))
-
-          if failed:
-              print()
-              print("cmd.exe 解析 LF-only 批处理时会把每行从中间切断,")
-              print("用户看到的是满屏「'xxx' 不是内部或外部命令」。")
-              print("修复:转成 CRLF 后重新 git add。")
-              sys.exit(1)
-
+      # 这里原来还有一段 `shell: python` 的内联脚本,专门查 bat 的 CRLF。
+      # 它和 tests/test_bat_line_endings.py 是同一份逻辑的两份实现,
+      # 迟早会漂移;而且它踩了两个环境坑:
+      #   * ubuntu runner 上没有 `python` 这个命令(只有 python3),脚本起不来;
+      #   * Windows runner 上 print 中文直接 UnicodeEncodeError(cp1252)。
+      # 现在只留测试那一份 —— 它断言的更细(blob / 工作区 / .gitattributes / BOM),
+      # 失败信息也照样把 cmd.exe 的解析行为讲清楚。
       - name: unit tests
         run: uv run --with websockets python -m unittest discover -s tests -v

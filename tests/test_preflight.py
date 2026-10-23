@@ -12,6 +12,7 @@
 """
 import json
 import os
+import shutil
 import socket
 import sys
 import tempfile
@@ -216,14 +217,35 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(cfg, {"astrbot_ob_url": "ws://127.0.0.1/ws"})
 
     def test_report_notes_running_wechat_as_warning_not_error(self):
-        # 只 mock 掉外部依赖(端口探测 / 进程列表 / 权限),wxhook 目录用真的:
-        # 把 find_wxhook_dirs 桩成 [] 会额外产生"没找到 wxhook 包"这个
-        # 真问题,反而把要验证的那条警告压掉了。
+        """
+        "微信在跑" 是提醒,不是错误。
+
+        这条以前只在开发机上过 —— 因为它依赖跑测试的那台机器恰好装好了
+        wxhook、而且恰好是 Windows。CI 的 Linux runner 两样都没有:
+
+        * ``find_wxhook_dirs`` 返回空 -> run() 多报一条真问题
+          「没找到 wxhook 包」;而 run() 的规则是「已经有问题就不再加
+          这条提醒」(否则真问题会被重复警告淹了),于是警告被压掉;
+        * ``_check_wechat_version`` 读不到注册表 -> 又多一条问题。
+
+        结果这条测试变成在测 "runner 上装了什么",而不是 "微信在跑会怎样"。
+        把这两处外部检查钉住,断言才只关于行为本身。
+        """
+        wxhook_dir = Path(tempfile.mkdtemp(prefix="wxhook-dirs-"))
+        self.addCleanup(shutil.rmtree, wxhook_dir, ignore_errors=True)
+        (wxhook_dir / "tools").mkdir()
+
         with patch.object(preflight, "port_in_use", only(PORT_6199)), \
              patch.object(preflight, "running_wechat_pids", return_value=[1234]), \
-             patch.object(preflight, "is_admin", return_value=True):
+             patch.object(preflight, "is_admin", return_value=True), \
+             patch.object(preflight, "find_wxhook_dirs", return_value=[wxhook_dir]), \
+             patch.object(preflight, "inspect_tools",
+                          return_value={"ok": True, "problems": [], "files": {}}), \
+             patch.object(preflight, "_check_wechat_version",
+                          return_value={"ok": True, "version": "3.9.5.81"}):
             report = preflight.run({"astrbot_ob_url": "ws://127.0.0.1/ws"})
         self.assertEqual(report["ob_url"], "ws://127.0.0.1:6199/ws")
+        self.assertEqual(report["problems"], [], report)
         self.assertTrue(any("微信已经在运行" in w for w in report["warnings"]), report)
 
     def test_running_wechat_is_quiet_when_a_real_problem_exists(self):
