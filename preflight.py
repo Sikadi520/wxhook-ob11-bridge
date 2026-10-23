@@ -503,6 +503,14 @@ def run(cfg: dict, log_=None, probe=None) -> dict:
     # 5) 微信进程
     pids = running_wechat_pids()
     report["wechat_pids"] = pids
+
+    # 6) 已安装的微信版本 —— 2026-10-23 的教训:这一项以前根本没人查,
+    #    用户唯一线索就是一句 Exception: unknown error。
+    ver = _check_wechat_version(lg)
+    report["wechat_version"] = ver
+    if ver and not ver.get("ok"):
+        report["problems"].append(ver.get("message") or "微信版本不对")
+
     # 同一个事只报一次:“微信在跑”既是“启动前要清”又是“端口被占”的因。
     # 以前会打两三条意思差不多的警告,反而把真正的问题(比如端口填错)淹了。
     if pids and not report["problems"]:
@@ -512,6 +520,67 @@ def run(cfg: dict, log_=None, probe=None) -> dict:
         lg.info("微信已经在运行(pid=%s),启动时会先结束它再接管", pids)
 
     return report
+
+
+def _check_wechat_version(lg):
+    """
+    检查“装的微信是不是 3.9.5.81”,并顺带找“正在升级”的痕迹。
+
+    单独包一层 try:版本检测失败(非 Windows / 注册表读不到)不应该把
+    整轮自检搞挂 —— 只是少一项信息。
+    """
+    try:
+        import wechat_version as wv
+    except Exception:
+        return None
+    try:
+        info = wv.installed_wechat_version()
+        traces = wv.update_traces(
+            Path(info["install_dir"]) if info.get("install_dir") else None)
+    except Exception:
+        log.exception("微信版本检测失败(忽略)")
+        return None
+
+    version = info.get("version") or ""
+    ok = version == SUPPORTED_WECHAT_VERSION
+    result = {"ok": ok, "version": version, "source": info.get("source"),
+              "install_dir": info.get("install_dir"),
+              "traces": traces, "message": ""}
+
+    lg.info("微信版本:%s(来源 %s),需要 %s —— %s",
+            version or "判定不了", info.get("source") or "-",
+            SUPPORTED_WECHAT_VERSION, "匹配" if ok else "不匹配")
+    if not version:
+        lg.error("读不到微信版本(注册表和 FileVersion 都没能确定)。")
+        result["message"] = (
+            "读不到微信版本。请确认微信已安装;若确实装了,直接在命令行跑"
+            " python -m wechat_version 看原始输出")
+        return result
+
+    if not ok:
+        result["message"] = (
+            "微信版本不对:已安装 %s,wxhook 0.0.10 只认 %s。\n%s"
+            % (version, SUPPORTED_WECHAT_VERSION,
+               wv.recover_hint(info.get("install_dir") or "")))
+
+    # 正在升级的迹象:命中任何一条都值得单独提醒
+    hints = []
+    if traces.get("tmp_dirs"):
+        hints.append("出现暂存目录 %s(升级正在进行)" % ", ".join(traces["tmp_dirs"]))
+    if traces.get("patch_dir"):
+        hints.append("差分包工作区非空:%s" % traces["patch_dir"])
+    nut = traces.get("need_update_type")
+    if nut not in (None, 0):
+        hints.append("注册表 NeedUpdateType=%s(≠0 表示更新在准备)" % nut)
+    if traces.get("suspicious_version_dirs"):
+        hints.append("安装目录里另有版本目录:%s"
+                     % ", ".join(traces["suspicious_version_dirs"]))
+    if hints:
+        result["update_warnings"] = hints
+        for h in hints:
+            lg.warning("[升级迹象] %s", h)
+        lg.warning("  微信能在后台把自己换掉;装完新版不封锁的话大约只能撑 5–12 分钟。")
+    return result
 
 
 def log_report(report: dict, lg=None):

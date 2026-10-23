@@ -61,6 +61,27 @@ if not exist "config.json" (
 )
 
 rem ------------------------------------------------------------------
+rem  Pre-flight (--doctor)
+rem  2026-10-23:微信在后台把自己从 3.9.5.81 升到 3.9.12.55,
+rem  start-wechat.exe 注入失败只回 "unknown error",用户完全看不出
+rem  是版本问题。这里先跑一次只读体检,不通就停住 —— 不再让用户
+rem  在 30 秒后只看一句 unknown error。
+rem ------------------------------------------------------------------
+set "DOCTOR=uv run --with wxhook --with pymem --with websockets python main.py --doctor"
+%DOCTOR%
+if errorlevel 1 (
+    echo.
+    echo ================================================================
+    echo   [STOP] Pre-flight check failed. Fix the items above first.
+    echo          Nothing was started; WeChat was not touched.
+    echo ================================================================
+    echo.
+    pause
+    exit /b 1
+)
+
+echo ==================================================================
+rem ------------------------------------------------------------------
 rem  Defender / antivirus pre-check
 rem  wxhook ships faker.exe + start-wechat.exe. Defender keeps deleting
 rem  them (WinError 225 / "file contains a virus"), after which WeChat
@@ -87,18 +108,16 @@ echo ==================================================================
 echo   WeChat alt account  ^<-^>  wxhook  ^<-^>  OneBot v11  ^<-^>  AstrBot
 echo ==================================================================
 echo.
-echo   BEFORE STARTING:
-echo     1. AstrBot must be running.
-echo        Port: open the AstrBot WebUI -^> Platform -^> aiocqhttp.
-echo              4.x listens on 6199, 3.x on 11229.
-echo        Leave the port out of astrbot_ob_url and the bridge finds it.
-echo     2. WeChat must NOT be running  [this script starts it].
+echo   Pre-flight passed. Starting...
 echo.
 echo   Version gate: faked_version AND patch_x64_to_x32 must BOTH be on.
-echo   If either is missing it is fixed automatically at startup.
-echo.
-echo   Sign in with the ALT account. If you see "client version too low":
+echo   If you see "client version too low":
 echo     scan -^> do NOT confirm -^> scan again -^> confirm.
+echo.
+echo   NOTE: WeChat may silently auto-upgrade itself even while running:
+echo         3.9.5.81 -^> 3.9.12.x. After that wxhook can no longer inject.
+echo         If that happens, this pre-flight will catch it next time.
+echo         (The old advice "just block WeChatUpdate.exe" does NOT work.)
 echo.
 echo   To stop: press Ctrl+C, then quit WeChat manually.
 echo.

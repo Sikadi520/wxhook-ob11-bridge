@@ -42,6 +42,8 @@ from pathlib import Path
 
 from wxhook import Bot, events
 
+from preflight import SUPPORTED_WECHAT_VERSION
+
 log = logging.getLogger("wechat")
 
 # "微信已登录"的就绪标记。外部程序(比如 AstrBot 的启动致辞插件)可以轮询它,
@@ -132,6 +134,41 @@ def _is_blocked_by_av(exc):
     text = str(exc).lower()
     return any(k in text for k in ("virus", "病毒", "垃圾软件",
                                    "faker.exe", "系统找不到指定的文件"))
+
+
+def _start_wechat_error_text(exc) -> str:
+    """
+    取出 `start-wechat.exe` 回给 wxhook 的原始文案。
+
+    wxhook 的写法是:
+        code, output = start_wechat_with_inject(port)
+        if code == 1:
+            raise Exception(output)
+    所以真正的错误原文在 `str(exc)` 里,常见为:
+        "unknown error"   —— 注入失败(最常见原因:微信版本不对)
+        "port occupied:NNNNN"
+        "dll not found"
+    这些文案以前全被归成一句“请确认 3.9.5.81 已安装”,没有可定位信息。
+    """
+    return str(exc or "").strip()
+
+
+def _classify_start_error(exc):
+    """
+    把 start-wechat.exe 的失败文案分成可处理的几类。
+
+    返回 ``(类别, 原文)``;认不出就返回 ``("unknown", 原文)``。
+    """
+    text = _start_wechat_error_text(exc).lower()
+    if not text:
+        return "empty", ""
+    if "occupied" in text:
+        return "port_occupied", text
+    if "dll" in text and ("not found" in text or "找不到" in text):
+        return "dll_missing", text
+    if "unknown error" in text:
+        return "unknown_client", text
+    return "unknown", text
 
 
 class WeChatSide:
@@ -230,12 +267,15 @@ class WeChatSide:
 
     def _report_start_failure(self, exc):
         """
-        把"看不出所以然"的启动异常翻译成下一步该做什么。
+        把“看不出所以然”的启动异常翻译成下一步该做什么。
 
-        报告 P0-2 的现场:
-            OSError: [WinError 225] 无法成功完成操作,因为文件包含病毒…
-            FileNotFoundError: [WinError 2] 系统找不到指定的文件。
-        旧代码只打一句"微信是否已安装 3.9.5.81?",用户只能去翻堆栈。
+        已覆盖的现场:
+          P0-2  WinError 225 / 2  → faker.exe 被杀手（已处理）
+          P0-3  WinError 10043    → 端口被占
+          2026-10-23  微信被自动升级后 start-wechat.exe 回 `unknown error`,
+                     以前只能落到“请确认 3.9.5.81 已安装” —— 方向对,但没有任何
+                     可定位信息。现在会把**已安装版本、版本目录、待升级痕迹**
+                     一起打出来,并直接给恢复步骤。
         """
         code = _winerror_of(exc)
         if _is_blocked_by_av(exc):
@@ -249,6 +289,8 @@ class WeChatSide:
             log.error("原始错误: %s: %s", type(exc).__name__, exc)
             return
 
+        kind, text = _classify_start_error(exc)
+
         # 管理员权限单独说清楚 —— 权限不够时这里报的往往是含糊的拒绝访问
         try:
             from preflight import is_admin
@@ -259,10 +301,83 @@ class WeChatSide:
             # 自检已经报过“不是管理员”,这里只补一句怎么处理,不重复同一个警告
             log.error("注入 DLL 必须提权:请右键 start.bat → 以管理员身份运行。")
 
-        log.exception("微信侧启动失败:请确认微信 3.9.5.81 已安装、且启动前没有在运行"
-                      if elevated else "微信侧启动失败(当前进程未提权)")
+        # 先把版本现场打出来 —— unknown error 最常见的根因就是它
+        version_info = self._describe_installed_version()
+        if version_info is not None and not version_info.get("ok"):
+            self._print_version_problem(version_info)
+            log.exception("微信侧启动失败(start-wechat.exe 回报 %r)", text or exc)
+            return
+
+        if kind == "port_occupied":
+            log.error("start-wechat.exe 回报:%s", text)
+            log.error("→ 上次的注入进程还占着端口。请完全退出微信(托盘也退)后重试;")
+            log.error("  本脚本下次启动会自动清 wxhook 端口状态文件。")
+            log.exception("微信侧启动失败")
+            return
+        if kind == "dll_missing":
+            log.error("start-wechat.exe 回报:%s", text)
+            log.error("→ wxhook.dll 不在位(又是被杀软删了?)。重跑一次安装即可恢复。")
+            log.exception("微信侧启动失败")
+            return
+
+        log.exception("微信侧启动失败:请确认微信 %s 已安装、且启动前没有在运行"
+                      % SUPPORTED_WECHAT_VERSION if elevated
+                      else "微信侧启动失败(当前进程未提权)")
+        if kind == "unknown_client":
+            # 到了这里说明版本检查过了(或者没法判),把可能性缩到最小
+            log.error("")
+            log.error("start-wechat.exe 只回了一个 'unknown error',wxhook 没有更多信息。")
+            log.error("已排除:版本(%s)、杀软(文件都在)、管理员权限。"
+                      % (version_info.get("version") if version_info else "未检"))
+            log.error("剩下最可能的两个原因:")
+            log.error("  1) 启动前微信仍在运行 —— 请完全退出(含托盘)再试")
+            log.error("  2) 安装目录不对 —— 本机读到的安装目录: %s",
+                      (version_info or {}).get("install_dir") or "(读不到)")
         if code:
             log.error("WinError %s —— 具体见上面的堆栈和 logs/bridge.log", code)
+
+    def _describe_installed_version(self):
+        """拿一份版本现场;拿不到就返回 None(不让报错处理本身再抛)。"""
+        try:
+            import wechat_version as wv
+        except Exception:
+            return None
+        try:
+            info = wv.installed_wechat_version()
+            info["ok"] = (info.get("version") == wv.SUPPORTED_VERSION)
+            return info
+        except Exception:
+            return None
+
+    def _print_version_problem(self, info):
+        """把“版本不对”这件事以及恢复步骤完整打出来。"""
+        import wechat_version as wv
+        log.error("")
+        log.error("=" * 70)
+        log.error("  微信版本不对 —— 这就是 wxhook 注入不上、只回 unknown error 的原因")
+        log.error("=" * 70)
+        log.error("  已安装 : %s(来源 %s)",
+                  info.get("version") or "判定不了", info.get("source") or "-")
+        log.error("  需要   : %s", wv.SUPPORTED_VERSION)
+        log.error("  安装目录: %s", info.get("install_dir") or "(读不到)")
+        dirs = info.get("dirs") or []
+        if dirs:
+            log.error("  版本目录: %s", ", ".join(d.get("name") for d in dirs))
+        try:
+            traces = wv.update_traces(
+                info.get("install_dir") or None)
+            for hint in (traces.get("tmp_dirs") or []):
+                log.error("  [升级迹象] 暂存目录 %s", hint)
+            if traces.get("patch_dir"):
+                log.error("  [升级迹象] 差分包工作区 %s", traces["patch_dir"])
+            if traces.get("need_update_type") not in (None, 0):
+                log.error("  [升级迹象] NeedUpdateType=%s", traces["need_update_type"])
+        except Exception:
+            pass
+        log.error("")
+        for line in wv.recover_hint(info.get("install_dir") or "").splitlines():
+            log.error("  %s", line)
+        log.error("=" * 70)
 
     # ---------- 版本伪装(显式调用 + 落日志) ----------
 

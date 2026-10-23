@@ -14,9 +14,10 @@
 
 | # | 坑 | 现在怎么处理 |
 | --- | --- | --- |
-| 1 | **AstrBot 端口**：3.x 是 `11229`，4.x 默认 `6199`，写死哪个都会让另一拨人连不上（`WinError 1225`） | 配置里**不写端口**就让桥接自己探测；写错了也会在日志里明说「端口上没有服务在监听」 |
-| 2 | **`faker.exe` 被 Defender 查杀**，微信根本起不来（`WinError 225` → `2`） | `start.bat` 启动前先查文件在不在；真挂了给出可直接复制的排除命令 |
-| 3 | **`faked_version` 和 `patch_x64_to_x32` 必须同时开**，只开一个都是「当前客户端版本过低」 | 只开一半会自动补齐，并在日志里写明改了哪里、怎么改回去 |
+| 1 | **微信会静默把自己升级掉**（3.9.5.81 → 3.9.12.x，同一天两次），升完 wxhook 注入不上，只报 `unknown error` | `start.bat` 启动前先比对注册表版本，不对就停住并给恢复步骤；重装只能撑 5–12 分钟，必须配合封锁 |
+| 2 | **AstrBot 端口**：3.x 是 `11229`，4.x 默认 `6199`，写死哪个都会让另一拨人连不上（`WinError 1225`） | 配置里**不写端口**就让桥接自己探测；写错了也会在日志里明说「端口上没有服务在监听」 |
+| 3 | **`faker.exe` 被 Defender 查杀**，微信根本起不来（`WinError 225` → `2`） | `start.bat` 启动前先查文件在不在；真挂了给出可直接复制的排除命令 |
+| 4 | **`faked_version` 和 `patch_x64_to_x32` 必须同时开**，只开一个都是「当前客户端版本过低」 | 只开一半会自动补齐，并在日志里写明改了哪里、怎么改回去 |
 
 ---
 
@@ -29,13 +30,59 @@
 - [tom-snow/wechat-windows-versions](https://github.com/tom-snow/wechat-windows-versions/releases) —— 含 [WeChat 3.9.5.81](https://github.com/tom-snow/wechat-windows-versions/releases/download/v3.9.5.81/WeChatSetup-3.9.5.81.exe)
 - 本仓库的适配层**实测跑通的是 3.9.5.81**；4.x 理论上可用，未验证，欢迎贴日志
 
-**装完第一件事：关掉自动升级。** 3.9.x 会自己升到 4.x，升上去就白装了：
+### ⚠️ 微信会静默把自己升级掉
 
-1. 登录后 → 设置 → 通用设置 → 取消「有更新时自动升级微信」
-2. 把安装目录里的 `WeChatUpdate.exe` 改名成 `WeChatUpdate.exe.bak`
-3. `reg add "HKCU\Software\Tencent\WeChat" /v NeedUpdateType /t reg_dword /d 0 /f`
+**这是这个项目最容易踩的坑，比端口和门禁都容易。**
 
-### 提示「当前客户端版本过低」
+2026-10-23 实测：微信在**后台、不弹窗、不需要重启电脑**的情况下，把自己从
+3.9.5.81 升到了 3.9.12.55，**同一天发生了两次**（15:48 和 16:58）。重装
+3.9.5.81 而不做任何封锁，**大约只能撑 5–12 分钟**。
+
+升级完成后，桥接启动只会看到一句毫无信息量的报错：
+
+```
+Exception: unknown error
+```
+
+因为 wxhook 0.0.10 只认 3.9.5.81，`start-wechat.exe` 注入失败就只回这一句。
+
+#### 网传「防升级三步」——全都是错的
+
+| 常见说法 | 实测结果 |
+| --- | --- |
+| 取消勾选「有更新时自动升级微信」 | ⚠️ 只是客户端偏好，拦不住 XPlugin 热更新链路。两轮升级都发生在勾选为默认值的情况下 |
+| 把安装目录的 `WeChatUpdate.exe` 改名 | ❌ **根目录根本没这个文件**。真实文件在 `[3.9.5.81]\` 子目录里，而且真正执行的是 XPlugin 与 `C:\ProgramData\Tencent\WeChat` 下的副本 |
+| `reg add ... NeedUpdateType /d 0` | ❌ **它是状态字段，不是开关**。升级前本来就是 0；升级准备期间自己会变成 200，升完又回 0 |
+
+> 这第三步曾写在本仓库的 README 里，是错的，现已删除。
+
+#### 真正能做的
+
+**硬封三处写入点**（管理员 PowerShell，**先完全退出微信**）：
+
+```powershell
+$deny = "$env:USERNAME:(WD,AD,DC)"     # 写文件 / 建子目录 / 删子项
+icacls 'C:\WeChat'                              /deny $deny /T /C
+icacls 'C:\ProgramData\Tencent\WeChat'          /deny $deny /T /C
+icacls "$env:APPDATA\Tencent\WeChat\XPlugin"    /deny $deny /T /C
+```
+
+- **`DC`（删除子项）必须一起拒** —— 只挡写不挡删，`[3.9.5.81]` 照样会被删掉换新
+- 上面的 `C:\WeChat` 换成你的**实际安装目录**（微信装 D 盘就写 `D:\WeChat`）
+- 副作用：微信可能在「检查更新」时报错，忽略即可；卸载/重装前要先解除
+- 解除：`icacls <路径> /remove:d "$env:USERNAME" /T /C`
+
+**桥接侧的兜底**：v0.2.1 起 `start.bat` 启动前会跑 `--doctor`，直接对比
+注册表版本，不对就停住并打印恢复步骤，不会再让你等着看 `unknown error`。
+
+```bat
+REM 随时手动体检：
+uv run --with wxhook --with pymem --with websockets python main.py --doctor
+```
+
+---
+
+## 提示「当前客户端版本过低」
 
 腾讯对老客户端加了服务端版本门禁。**同一个开关只开一半一定过不去**，2026-10-23 的对照实验：
 

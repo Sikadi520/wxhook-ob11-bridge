@@ -209,9 +209,12 @@ class StartFailureTest(unittest.TestCase):
         self.addCleanup(self.modules.stop)
 
         # preflight 在 _report_start_failure 里才 import;预先塞进去,
-        # 好让“不是管理员”这个分支在测试里可控
+        # 好让“不是管理员”这个分支在测试里可控。
+        # 注意需要把 SUPPORTED_WECHAT_VERSION 也带上 —— wechat.py
+        # 在模块级 import 它,只给 is_admin 会 ImportError。
         preflight = types.ModuleType("preflight")
         preflight.is_admin = lambda: True
+        preflight.SUPPORTED_WECHAT_VERSION = "3.9.5.81"
         self.preflight_patch = patch.dict(sys.modules, {"preflight": preflight})
         self.preflight_patch.start()
         self.addCleanup(self.preflight_patch.stop)
