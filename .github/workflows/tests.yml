@@ -1,0 +1,60 @@
+name: tests
+
+# 为什么必须在 Linux 上也跑:
+# tests/test_bat_line_endings.py 读的是 git 对象库里的 blob,和平台无关。
+# 所以即使 bug 只影响 Windows 用户,Linux runner 也能抓到
+# “start.bat 被提交成 LF” —— 而它在编辑器、git diff 里完全看不出来。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: set up python
+        run: uv python install 3.12
+
+      # 把最关键的一条单独拎出来,失败信息才看得懂
+      - name: bat must be CRLF in git
+        shell: python
+        run: |
+          import subprocess
+          import sys
+
+          files = subprocess.run(
+              ["git", "ls-files", "*.bat", "*.cmd"],
+              capture_output=True, text=True, check=True).stdout.split()
+
+          failed = []
+          for path in files:
+              blob = subprocess.run(["git", "cat-file", "-p", ":" + path],
+                                    capture_output=True, check=True).stdout
+              lf = blob.count(b"\n")
+              crlf = blob.count(b"\r\n")
+              stray = lf - crlf
+              if stray:
+                  failed.append((path, stray, lf))
+                  print("FAIL: %s 有 %d 个孤立 LF(共 %d 行)" % (path, stray, lf))
+              else:
+                  print("OK: %s 为纯 CRLF(%d 行)" % (path, lf))
+
+          if failed:
+              print()
+              print("cmd.exe 解析 LF-only 批处理时会把每行从中间切断,")
+              print("用户看到的是满屏「'xxx' 不是内部或外部命令」。")
+              print("修复:转成 CRLF 后重新 git add。")
+              sys.exit(1)
+
+      - name: unit tests
+        run: uv run --with websockets python -m unittest discover -s tests -v

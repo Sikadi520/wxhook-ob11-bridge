@@ -308,6 +308,8 @@ uv cache clean wxhook      # 清掉缓存,下次启动会重新下载
 
 | 现象 | 原因 / 处理 |
 | --- | --- |
+| 双击后满屏 `'xxx' 不是内部或外部命令`，且每个报错都是某个单词的**后半截** | `start.bat` 的换行符被转成了 LF。0.2.1 及以前的包有这个问题，**升级到 0.2.3+ 即可**；旧包手动修：[转 CRLF](#双击后满屏不是内部或外部命令) |
+| `uv not found` 但明明装了 | 用 winget 装的 uv 不在 `%USERPROFILE%\.local\bin`，且旧终端的 PATH 是缓存的。见 [uv 找不到](#uv-not-found) |
 | `WinError 1225` / 连不上 AstrBot | 端口不对。`astrbot_ob_url` 省掉端口让桥接自己探测，或改成实际端口 |
 | 提示「当前客户端版本过低」 | 两个开关没一起开（会自动补齐）；补齐后按 [扫码顺序](#提示当前客户端版本过低) 扫 |
 | `WinError 225` / 微信起不来 | `faker.exe` 被查杀，见[杀软](#杀软defender) |
@@ -321,6 +323,60 @@ uv cache clean wxhook      # 清掉缓存,下次启动会重新下载
 | 连发好几条回复 | `buffer_seconds` 调大 |
 
 更多见 [`docs/配置与排障.md`](docs/配置与排障.md)。
+
+### 双击后满屏“不是内部或外部命令”
+
+现象很特殊，一看就能认出来：**每个报错都是某个单词的后半截**。
+
+```
+'istrator' 不是内部或外部命令      ← Administrator
+'rlevel' 不是内部或外部命令        ← errorlevel
+'ements.txt' 不是内部或外部命令    ← requirements.txt
+'------------------------------------' 不是内部或外部命令
+```
+
+连 `rem` 注释里的分界线都被当成命令执行了 —— 这是“行被截断”的指纹，
+不是拼写错误，也不是 PATH 问题。
+
+**原因**：`start.bat` 是 LF-only。`cmd.exe` 解析批处理时按字节偏移逐行推进，
+LF-only 再加上多字节中文注释会累积错位，把每行从中间切断。
+
+**修复**（旧包）：PowerShell 里跑
+
+```powershell
+$p = ".\start.bat"
+Copy-Item $p "$p.lf.bak"
+$t = [IO.File]::ReadAllText($p) -replace "`r`n","`n" -replace "`n","`r`n"
+[IO.File]::WriteAllText($p, $t, (New-Object Text.UTF8Encoding($false)))
+```
+
+然后重新双击。**0.2.3 起已修**，仓库里的 blob 就是 CRLF，`git clone`、
+Download ZIP、Raw 单文件下载三种渠道拿到的都是可执行文件。
+
+> 为什么这件事很难自查：文件内容逐字相同，编辑器、`git diff`、Linux CI
+> 都看不出来，只有真的用 cmd 跑一次才暴露。所以加了一条测试直接读 git
+> 对象库里的 blob（`tests/test_bat_line_endings.py`），错了就 fail。
+
+### uv not found
+
+`start.bat` 会把 `%USERPROFILE%\.local\bin` 加到 PATH 前面。用 winget 装的 uv
+在那之前不在哪儿，而且已经开着的终端继承的是旧 PATH。
+
+最简单的办法：手动装一次 uv（会装到 `.local\bin`）：
+
+```powershell
+powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+或者给现有 uv 建一个硬链接（不用重装）：
+
+```powershell
+New-Item -ItemType HardLink `
+  -Path "$env:USERPROFILE\.local\bin\uv.exe" `
+  -Target "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\astral-sh.uv_Microsoft.Winget.Source_8wekyb3d8bbwe\uv.exe"
+```
+
+验证：新开一个终端，`where uv` 应该能看到路径。
 
 ---
 

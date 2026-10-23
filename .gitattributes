@@ -1,7 +1,34 @@
+# 默认:仓库内统一 LF,检出时按平台转换
 * text=auto eol=lf
 
-# Windows 批处理必须原样保存 CRLF:用 -text 关掉换行归一化,
-# 这样 git clone 和 GitHub 的 "Download ZIP" 拿到的是同一份 CRLF 文件。
-# (用 `text eol=crlf` 的话仓库里存的是 LF,ZIP 下载出来就是 LF,cmd 解析 if 块会出问题)
+# ---------------------------------------------------------------------------
+# Windows 批处理:.bat 必须【在仓库 blob 里就是 CRLF】
+#
+# 2026-10-23 出过一次真实故障(见 REPORT-start-bat-crlf):
+# 用户双击 start.bat,满屏 "'istrator' 不是内部或外部命令" ——
+# 每个报错都是某个单词的后半截(Administrator→istrator、
+# errorlevel→rlevel、requirements.txt→ements.txt)。
+#
+# 根因:blob 里只有 LF。cmd.exe 解析 .bat 时按字节偏移逐行推进,
+# LF-only 加上多字节中文注释会累积错位,把每行从中间切断,
+# 前半截丢弃、后半截当命令执行。
+#
+# 为什么用 -text 而不是 text eol=crlf(实测对比):
+#
+#   写法              仓库 blob   clone/ZIP   Raw 单文件下载
+#   ----------------  ---------   ---------   --------------
+#   text eol=crlf     LF          CRLF ✓      LF  ✗ 仍然会炸
+#   -text(本文件)    CRLF ✓      CRLF ✓      CRLF ✓
+#
+#   `text eol=crlf` 只保证"检出时"是 CRLF,blob 里仍是 LF。
+#   而 GitHub 上点文件右上角的「Raw / Download raw file」拿到的是
+#    blob 原样 —— 用户按单文件下载就会再中一次。
+#   `-text` 的语义是「完全不转换」,提交什么就分发什么,
+#   所以只要 blob 是 CRLF,所有渠道都是 CRLF。
+#
+# 代价:git 不再帮你做换行归一化。所以必须有测试盯着 ——
+# tests/test_bat_line_endings.py 直接读 git 对象库里的 blob
+# (不是工作区文件)断言它是 CRLF,错了就 fail。
+# ---------------------------------------------------------------------------
 *.bat -text
 *.cmd -text
