@@ -19,6 +19,7 @@ from pathlib import Path
 from mentions import split_mention
 from ob11 import (DEFAULT_MAX_SIZE, OneBotClient, compose_message,
                   make_message_event, stable_id)
+from preflight import reset_port_state, resolve_ob_url
 from wechat import WeChatSide
 
 log = logging.getLogger("bridge")
@@ -70,6 +71,10 @@ class Bridge:
             on_send_image=self._send_image,
             on_send_file=self._send_file,
             max_size=max_size,
+            # 配置里没写端口时,每次(重)连都先探测 AstrBot 到底在 6199 还是 11229。
+            # 报告 P0-1:默认值 11229 是 AstrBot 3.x 的事,4.x 默认 6199,
+            # 写死哪个都会让另一拨人连不上。
+            url_resolver=resolve_ob_url,
         )
         self.wx = WeChatSide(cfg, self._on_wechat_message,
                              on_image=self._on_wechat_image,
@@ -77,10 +82,34 @@ class Bridge:
 
     def start(self):
         self._sweep_temp_files()      # 清掉上次遗留的落地文件
+        self._reset_wxhook_ports()
         self.ob.start()
         self.wx.start()
         threading.Thread(target=self._flush_loop, daemon=True,
                          name="flush").start()
+
+    def _reset_wxhook_ports(self):
+        """
+        把 wxhook 的端口账本清掉,让端口从 19001 重新分配。
+
+        为什么必须在 bridge 里做(而不是只在 main 里):
+        wxhook 的 tools/wxhook.json 会记下上一次用的 remote/server 端口,
+        而且它的 "clean" 只保留 pid 还活着的条目。上一个进程如果卡在
+        半死状态,新实例会拿到 remote=19002/server=18998,而 DLL 里
+        config.ini 的 port 固定是 19001 —— 两边对不上就变成
+        WinError 10043 / 一条消息都收不到。
+        """
+        try:
+            from preflight import find_wxhook_dirs
+            for d in find_wxhook_dirs(limit=3):
+                state = d / "tools" / "wxhook.json"
+                if not state.exists():
+                    continue
+                for note in reset_port_state(d):
+                    log.info("%s", note)
+                break
+        except Exception:
+            log.exception("重置 wxhook 端口状态失败(忽略,继续启动)")
 
     # ---------- ID 映射 ----------
 

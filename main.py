@@ -2,16 +2,17 @@ r"""
 微信(小号) <-> wxhook <-> OneBot v11 <-> AstrBot
 
 启动前:
-  1. AstrBot 已经启动(它的 python 后端应监听 11229,即 aiocqhttp 适配器)
+  1. AstrBot 已经启动(它的 aiocqhttp 适配器在监听;4.x 默认 6199,3.x 是 11229)
   2. 微信 3.9.5.81 已安装,且【没有】在运行(本脚本会自己启动它)
   3. 用【管理员】PowerShell 运行(要注入 DLL + 改微信进程内存)
 
 运行:
   uv run --with wxhook --with pymem --with websockets python main.py
 
-本脚本启动时会自动清理残留(不做就会撞端口):
-  - 上次遗留的 WeChat.exe 进程(它注入的 DLL 占着 19001)
-  - 所有 wxhook.json 端口状态文件
+启动时会依次做这些事(都有日志):
+  - 自检:是不是管理员 / AstrBot 端口到底在哪个 / faker.exe 还在不在
+  - 配置归一化:faked_version 和 patch_x64_to_x32 必须同时开,只开一半会自动补齐
+  - 清理残留:上次的 WeChat.exe、占用 18999 的桥接进程、wxhook 端口状态文件
 
 停止:
   建议顺序:先 Ctrl+C,再【手动退出微信】,然后才能重新启动。
@@ -29,6 +30,7 @@ import time
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parent
+sys.path.insert(0, str(BASE))
 
 
 def _cleanup_leftovers(log):
@@ -70,17 +72,23 @@ def _cleanup_leftovers(log):
     except Exception:
         pass
 
-    # 4) 清掉所有 wxhook 端口状态文件,让端口分配从 19001 重新开始
+    # 4) 清掉所有 wxhook 端口状态文件,让端口分配从 19001 重新开始。
+    #    注意:不限于 uv 缓存目录 —— 用 .venv / 本地 site-packages 装的时候
+    #    状态文件在别的地方,以前只扫 uv 缓存会漏(表现为"端口莫名其妙变 19002")。
+    #    不存在的目录不会 delete,所以这里安全。
     try:
-        base = Path(os.environ.get("LOCALAPPDATA", "")) / "uv" / "cache" / "archive-v0"
-        for p in base.rglob("wxhook.json"):
-            try:
-                p.unlink()
-                log.info("已重置端口状态文件: %s", p)
-            except Exception:
-                pass
+        from preflight import find_wxhook_dirs
+        dirs = find_wxhook_dirs()
+        if not dirs:
+            log.info("未找到 wxhook 包,跳过端口状态清理(首次启动会由 uv 安装)")
+        for d in dirs:
+            state = d / "tools" / "wxhook.json"
+            if not state.exists():
+                continue
+            state.unlink()
+            log.info("已重置端口状态文件: %s", state)
     except Exception:
-        pass
+        log.exception("清理 wxhook 端口状态失败(忽略,继续启动)")
 
 
 def _add_file_log():
@@ -117,7 +125,12 @@ def main():
             "请先复制一份模板再启动:\n"
             "    copy config.example.json config.json\n".format(cfg_path)
         )
-    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    try:
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
+    except Exception as exc:
+        sys.exit("\n配置文件解析失败:%s\n  文件:%s\n  常见原因:少逗号、多了注释、"
+                 "用了中文引号。可以拿 config.example.json 对照修正。\n"
+                 % (exc, cfg_path))
 
     logging.basicConfig(
         level=getattr(logging, str(cfg.get("log_level", "INFO")).upper(), logging.INFO),
@@ -127,20 +140,47 @@ def main():
     log = logging.getLogger("main")
     log_file = _add_file_log()
 
+    # ---------- 1) 配置归一化:伪装 + 补丁必须同时开 ----------
+    from options import normalize
+    opt = normalize(cfg, log)
+
     log.info("=" * 66)
     log.info("微信(小号)  <->  wxhook  <->  OneBot v11  <->  AstrBot")
     log.info("AstrBot 地址   : %s", cfg.get("astrbot_ob_url"))
-    log.info("版本伪装为     : %s", cfg.get("faked_version"))
-    log.info("x64->x32 补丁  : %s", cfg.get("patch_x64_to_x32"))
+    log.info("版本伪装为     : %s", cfg.get("faked_version") or "(未开启)")
+    log.info("x64->x32 补丁  : %s(上限 %s 处)",
+             cfg.get("patch_x64_to_x32"), cfg.get("patch_max_sites"))
     log.info("白名单         : %s", cfg.get("allowed_wxids") or "未启用(所有人可用)")
     if log_file:
         log.info("日志文件       : %s", log_file)
     log.info("=" * 66)
 
+    for msg in opt["adjusted"]:
+        log.warning("[配置自动修正] %s", msg)
+    for msg in opt["notes"]:
+        log.info("[配置] %s", msg)
+    if opt["adjusted"]:
+        log.info("[配置] 要还原成你自己写的值,把这一段写回 config.json:")
+        log.info("[配置]   %s", opt["revert"])
+
+    # ---------- 2) 启动前自检 ----------
+    from preflight import log_report, run as preflight_run
+    report = preflight_run(cfg, log)
+    log_report(report, log)
+    if report.get("ob_url"):
+        # 用探测到的实际地址(配置没写端口时,这里会把 6199 补上)
+        cfg["astrbot_ob_url"] = report["ob_url"]
+
+    # ---------- 3) wxhook(loguru)日志也进 bridge.log ----------
+    from wechat import attach_wxhook_logger
+    attach_wxhook_logger(log_file)
+
     _cleanup_leftovers(log)
 
     log.info("")
     log.info("wxhook 即将启动微信,请确认微信当前没有在运行...")
+    if opt["patch_x64_to_x32"]:
+        log.info("登录门禁:扫码 → 先不确认 → 再扫一次 → 点确认(两段式)")
     log.info("")
 
     from bridge import Bridge

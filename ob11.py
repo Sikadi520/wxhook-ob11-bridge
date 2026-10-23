@@ -30,6 +30,18 @@ log = logging.getLogger("ob11")
 # 注意:max_size 只限制【收到】的消息;发出去的不受它约束。
 DEFAULT_MAX_SIZE = 64 * 1024 * 1024
 
+# 连接被拒的错误码。Windows: 10061(WSAECONNREFUSED)/ 1225(WSAECONNREFUSED 的
+# ERROR_* 形式);POSIX: 111(ECONNREFUSED)。
+_REFUSED_CODES = (10061, 1225, 111)
+
+
+def _is_refused(exc) -> bool:
+    """是不是"对方端口没人监听"这一类错误。"""
+    for code in _REFUSED_CODES:
+        if str(code) in str(exc):
+            return True
+    return "refused" in str(exc).lower()
+
 
 def stable_id(text: str) -> int:
     """
@@ -99,7 +111,8 @@ class OneBotClient:
     def __init__(self, url: str, self_id: int,
                  on_send_text=None, on_send_image=None,
                  on_send_file=None,
-                 max_size: int = DEFAULT_MAX_SIZE):
+                 max_size: int = DEFAULT_MAX_SIZE,
+                 url_resolver=None):
         self.url = url
         self.self_id = self_id
         self.on_send_text = on_send_text
@@ -107,10 +120,15 @@ class OneBotClient:
         # record / file / video 段走这里(放歌的音频就是 record)
         self.on_send_file = on_send_file
         self.max_size = max_size
+        # 可选:每次重连前调一次,返回 (实际地址, 说明)。
+        # 用于「配置里没写端口 → 自动探测 AstrBot 在 6199 还是 11229」:
+        # AstrBot 如果中途换了端口,下一次重连也能跟上。
+        self.url_resolver = url_resolver
         self.ws = None
         self.loop = None
         self.ready = threading.Event()
         self._thread = None
+        self._failures = 0        # 连续失败次数,用于抑制重复日志
 
     def start(self):
         self._thread = threading.Thread(target=self._run, daemon=True, name="ob11")
@@ -128,13 +146,32 @@ class OneBotClient:
             except Exception:
                 pass
 
+    def _target(self):
+        """本次连接要用的地址。解析失败就退回配置里的原值。"""
+        if not self.url_resolver:
+            return self.url, None
+        try:
+            url, note = self.url_resolver(self.url)
+            return (url or self.url), note
+        except Exception:
+            log.exception("解析 AstrBot 地址失败,改用配置原值")
+            return self.url, None
+
+    def _log_target(self, target, note):
+        """连上后把"实际用了哪个端口"打出来 —— 这行是排障的第一现场。"""
+        if target != self.url:
+            log.info("已连接到 AstrBot: %s(配置未指定端口,%s)", target, note)
+        else:
+            log.info("已连接到 AstrBot: %s", target)
+
     async def _main(self):
         while True:
+            target, note = self._target()
             try:
                 log.info("正在连接 AstrBot: %s (单帧上限 %s 字节)",
-                         self.url, self.max_size if self.max_size else "无限制")
+                         target, self.max_size if self.max_size else "无限制")
                 async with websockets.connect(
-                    self.url,
+                    target,
                     # 不显式抬高的话,默认 1 MiB 会在收到 base64 图片时把连接掐断
                     max_size=self.max_size,
                     additional_headers={
@@ -145,7 +182,8 @@ class OneBotClient:
                 ) as ws:
                     self.ws = ws
                     self.ready.set()
-                    log.info("已连接到 AstrBot")
+                    self._failures = 0
+                    self._log_target(target, note)
 
                     async def _keepalive():
                         while True:
@@ -165,7 +203,19 @@ class OneBotClient:
                     finally:
                         ka.cancel()
             except Exception as e:
+                self._failures += 1
                 log.warning("连接断开或失败(%s),5 秒后重连", e)
+                # 报告 P0-1:WinError 1225 = 目标机器上没有东西在监听,
+                # 几乎总是端口填错(AstrBot 3.x 是 11229,4.x 默认 6199)。
+                # 旧文案只有一句"连接断开",看不出该改哪里,于是绕了一圈。
+                if _is_refused(e):
+                    log.warning("  ↑ 端口上没有服务在监听。确认 AstrBot 已启动,"
+                                "并在 WebUI → 平台 → aiocqhttp 看一眼实际端口;"
+                                "把它填进 config.json 的 astrbot_ob_url(例:ws://127.0.0.1:6199/ws)")
+                    log.warning("  ↑ 若配置里没写端口,桥接会自动试 11229 与 6199")
+                if self._failures == 6:
+                    log.warning("已经连续失败 %d 次,每 5 秒重试一次;"
+                                "AstrBot 启动后会自动连上,不用重启桥接", self._failures)
 
             self.ws = None
             self.ready.clear()

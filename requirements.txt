@@ -5,6 +5,7 @@
 wxhook==0.0.10
 websockets>=12,<16
 
-# 可选:只有把 config.json 里的 patch_x64_to_x32 打开才需要。
-# 该补丁已被验证无用且会导致微信随机崩溃,默认关闭。
+# pymem:只有把 config.json 里的 patch_x64_to_x32 打开才需要。
+# 注意:它现在是过登录门禁的必需项之一(伪装 + 补丁必须同时开),
+# 所以默认配置会用到它,建议保留。
 pymem>=1.12; sys_platform == "win32"

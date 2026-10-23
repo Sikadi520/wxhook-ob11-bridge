@@ -60,15 +60,45 @@ if not exist "config.json" (
     )
 )
 
+rem ------------------------------------------------------------------
+rem  Defender / antivirus pre-check
+rem  wxhook ships faker.exe + start-wechat.exe. Defender keeps deleting
+rem  them (WinError 225 / "file contains a virus"), after which WeChat
+rem  cannot start at all. Tell the user BEFORE the 30s of confusion.
+rem  We only look for the file; we never execute it here.
+rem ------------------------------------------------------------------
+if exist "%LOCALAPPDATA%\uv\cache\archive-v0" (
+    dir /b /s "%LOCALAPPDATA%\uv\cache\archive-v0\wxhook\tools\faker.exe" >nul 2>&1
+    if errorlevel 1 (
+        echo ================================================================
+        echo   [WARN] wxhook\tools\faker.exe was not found in the uv cache.
+        echo          Windows Defender most likely quarantined it.
+        echo          Run PowerShell AS ADMINISTRATOR, then restart this file:
+        echo            Add-MpPreference -ExclusionPath "$env:LOCALAPPDATA\uv\cache"
+        echo            Add-MpPreference -ExclusionProcess "faker.exe"
+        echo            Add-MpPreference -ExclusionProcess "start-wechat.exe"
+        echo            uv cache clean wxhook
+        echo ================================================================
+        echo.
+    )
+)
+
 echo ==================================================================
 echo   WeChat alt account  ^<-^>  wxhook  ^<-^>  OneBot v11  ^<-^>  AstrBot
 echo ==================================================================
 echo.
 echo   BEFORE STARTING:
-echo     1. AstrBot must be running     [check: netstat -ano ^| findstr :11229]
-echo     2. WeChat must NOT be running  [this script starts it]
+echo     1. AstrBot must be running.
+echo        Port: open the AstrBot WebUI -^> Platform -^> aiocqhttp.
+echo              4.x listens on 6199, 3.x on 11229.
+echo        Leave the port out of astrbot_ob_url and the bridge finds it.
+echo     2. WeChat must NOT be running  [this script starts it].
 echo.
-echo   A WeChat window will appear. Sign in with the ALT account.
+echo   Version gate: faked_version AND patch_x64_to_x32 must BOTH be on.
+echo   If either is missing it is fixed automatically at startup.
+echo.
+echo   Sign in with the ALT account. If you see "client version too low":
+echo     scan -^> do NOT confirm -^> scan again -^> confirm.
 echo.
 echo   To stop: press Ctrl+C, then quit WeChat manually.
 echo.

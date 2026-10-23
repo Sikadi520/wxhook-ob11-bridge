@@ -8,6 +8,18 @@
 
 ---
 
+## 三个必须先知道的事
+
+这三条都来自 2026-10-23 的现场排障报告（微信 3.9.5.81 + AstrBot 4.29.1），每一条都能独自让人卡上一小时：
+
+| # | 坑 | 现在怎么处理 |
+| --- | --- | --- |
+| 1 | **AstrBot 端口**：3.x 是 `11229`，4.x 默认 `6199`，写死哪个都会让另一拨人连不上（`WinError 1225`） | 配置里**不写端口**就让桥接自己探测；写错了也会在日志里明说「端口上没有服务在监听」 |
+| 2 | **`faker.exe` 被 Defender 查杀**，微信根本起不来（`WinError 225` → `2`） | `start.bat` 启动前先查文件在不在；真挂了给出可直接复制的排除命令 |
+| 3 | **`faked_version` 和 `patch_x64_to_x32` 必须同时开**，只开一个都是「当前客户端版本过低」 | 只开一半会自动补齐，并在日志里写明改了哪里、怎么改回去 |
+
+---
+
 ## 版本与登录
 
 ### 支持的微信版本
@@ -25,19 +37,43 @@
 
 ### 提示「当前客户端版本过低」
 
-腾讯对老客户端加了服务端版本门禁。社区的做法是**在扫码前**给微信进程打一个 `x64 → x32` 的内存补丁，再配合特定的扫码顺序：
+腾讯对老客户端加了服务端版本门禁。**同一个开关只开一半一定过不去**，2026-10-23 的对照实验：
 
-1. 把 `config.json` 的 `patch_x64_to_x32` 改成 `true`
-2. 启动 `start.bat`，微信会停在扫码界面（补丁在进程启动时打一次）
+| `faked_version` | `patch_x64_to_x32` | 结果 |
+| :---: | :---: | --- |
+| 空 | 开 | ❌ 版本过低，微信被关 |
+| `3.9.12.51` | **关** | ❌ 版本过低，弹窗在扫码前 |
+| `3.9.12.51` | 开 | ✅ 登录成功（两台机器） |
+
+所以**要一起开**：
+
+```jsonc
+{
+  "faked_version": "3.9.12.51",
+  "patch_x64_to_x32": true,
+  "patch_max_sites": 999
+}
+```
+
+留空或只开一半也没关系 —— 启动时会自动补齐，日志里长这样：
+
+```
+WARNING  [配置自动修正] patch_x64_to_x32=false → 已改为 true。伪装和补丁必须同时开:
+         实测只开伪装、只开补丁都是「当前客户端版本过低」
+```
+
+> 像以前那样想手动关掉它（比如为了排查 crash），把 `require_patch_and_faker` 设成 `false` 就行，桥接不再干预。
+
+**扫码顺序也有讲究**，补丁只在进程启动时打一次：
+
+1. 右键 `start.bat` → **以管理员身份运行**（注入和打补丁都要提权）
+2. 等日志出现 `faker 返回 0(成功)` 和 `x64->x32 补丁: 回读确认 30+ 处`
 3. 手机扫码 → **先不要点确认**
 4. 再扫一次
 5. 点确认登录
+6. 看到 `已登录: 昵称 (wxid_xxx)` 才算成功
 
-补丁的来源是 [alingalingling/Astrbot-wechat-bot-](https://github.com/alingalingling/Astrbot-wechat-bot-) 里的 `wechat_patcher.py`；本仓库的 `patch_audit.py` 是它的审计加强版。
-
-登录成功后**把 `patch_x64_to_x32` 改回 `false`**：补丁只在进程启动时执行一次，之后的会话恢复不需要它，而带着补丁跑大约每小时会崩一次（[设计说明 §7](docs/设计说明.md#7-关于-x64--x32-内存补丁)）。
-
-> 成功率随腾讯策略变化，不是每次都过；过不去就等几天再试。
+关于补丁本身的代价（开着跑大约每小时崩一次），见[设计说明 §7](docs/设计说明.md#7-关于-x64--x32-内存补丁)。
 
 ---
 
@@ -56,7 +92,7 @@ wxhook.dll
 main.py ─── bridge.py ─── ob11.py      ← 一个 Python 进程
     │  OneBot v11 over WebSocket
     ▼
-AstrBot  aiocqhttp 适配器（:11229）
+AstrBot  aiocqhttp 适配器（:6199 或 :11229）
     │
     ▼
 大模型 / 插件 / 记忆
@@ -90,7 +126,7 @@ AstrBot  aiocqhttp 适配器（:11229）
 
 - Windows 10 / 11，x64
 - 微信 **3.9.5.81**（[下载](https://github.com/tom-snow/wechat-windows-versions/releases/download/v3.9.5.81/WeChatSetup-3.9.5.81.exe)），且有个能正常登录的小号
-- 已安装并运行 [AstrBot](https://astrbot.app/)，并在里面建好 `aiocqhttp` 适配器（默认端口 11229）
+- 已安装并运行 [AstrBot](https://astrbot.app/)，并建好 `aiocqhttp` 适配器（3.x 默认 11229，4.x 默认 6199）
 - [uv](https://docs.astral.sh/uv/)（`start.bat` 用它拉起依赖）
 
 ### 步骤
@@ -102,22 +138,41 @@ copy config.example.json config.json
 ```
 
 1. **确认微信没有在运行** —— 脚本会自己启动它。
-2. **确认 AstrBot 在跑**：`netstat -ano | findstr :11229` 能看到 `LISTENING`。
-3. 右键 `start.bat` → 以管理员身份运行（要注入 DLL，必须提权）。
-4. 微信窗口自己弹出来，用小号扫码。
+2. **确认 AstrBot 在跑**。端口不用猜：
+   ```bat
+   netstat -ano | findstr LISTENING | findstr ":6199 :11229"
+   ```
+   或者直接看 WebUI → 平台 → aiocqhttp。
+3. 右键 `start.bat` → **以管理员身份运行**（要注入 DLL，必须提权）。
+4. 微信窗口自己弹出来，用小号扫码（顺序见上面「提示当前客户端版本过低」）。
 
 ### 启动日志应该长这样
 
 | 顺序 | 日志 |
 | --- | --- |
-| 1 | `正在连接 AstrBot: ws://127.0.0.1:11229/ws` |
-| 2 | `已结束残留的 WeChat.exe 进程` / `已重置端口状态文件` |
-| 3 | `微信已启动,wxhook.dll 已注入` |
-| 4 | `已连接到 AstrBot` |
-| 5 | `已登录: 昵称 (wxid_xxx)` |
-| 6 | `收到消息 [私聊] 来自 wxid_xxx: ...` |
+| 1 | `AstrBot 地址: ws://127.0.0.1:6199/ws(自动选中端口 6199…)` |
+| 2 | `[配置] 门禁条件:伪装 3.9.12.51 + x64→x32 补丁 已同时开启` |
+| 3 | `faker.exe  270336 字节  sha256=…`（三个工具文件都在） |
+| 4 | `已重置端口状态文件 …\wxhook\tools\wxhook.json` |
+| 5 | `已连接到 AstrBot: ws://127.0.0.1:6199/ws` |
+| 6 | `微信已启动,wxhook.dll 已注入` |
+| 7 | `faker 返回 0(成功),目标版本 3.9.12.51` |
+| 8 | `x64->x32 补丁: 回读确认 37 处…` |
+| 9 | `已登录: 昵称 (wxid_xxx)` |
+| 10 | `收到消息 [私聊] 来自 wxid_xxx: ...` |
 
-第 5 行出现之前，`send_text` 也会返回 `code=1`，但消息其实发不出去 —— 所以登录后会在同目录写一个 `ready.json`，外部程序（比如启动致辞插件）可以轮询它。
+第 9 行出现之前，`send_text` 也会返回 `code=1`，但消息其实发不出去 —— 所以登录后会在同目录写一个 `ready.json`，外部程序（比如启动致辞插件）可以轮询它。
+
+### 自检失败时先看这几行
+
+启动会给每一项检查打日志，`[自检]` 开头的都是要处理的：
+
+| 日志 | 含义 / 处理 |
+| --- | --- |
+| `[自检] 当前不是管理员` | 右键 `start.bat` → 以管理员身份运行 |
+| `[自检] 连不上 AstrBot: … 没有端口在监听` | AstrBot 没启动，或端口不是 6199/11229；直接改 `astrbot_ob_url` |
+| `[自检] wxhook 的文件不完整: faker.exe 不存在` | Defender 查杀了，见下面的[杀软](#杀软defender) |
+| `[自检] 微信已经在运行(pid=…)` | 不用管，启动前会自动结束它再接管 |
 
 ---
 
@@ -129,13 +184,54 @@ copy config.example.json config.json
 
 ```jsonc
 {
-  "astrbot_ob_url": "ws://127.0.0.1:11229/ws",  // 必须带 /ws
+  "astrbot_ob_url": "ws://127.0.0.1:6199/ws",   // 必须带 /ws；省掉端口就自动探测
   "allowed_wxids": ["wxid_你的主号"],            // 空 = 谁都能触发,务必填
   "bot_nicknames": ["小助手"]                    // 群里 @ 它时的昵称
 }
 ```
 
-> `allowed_wxids` 留空意味着**任何能给这个小号发消息的人**都能触发 AstrBot。如果你的 AstrBot 开了 shell / python 工具，等于把电脑交出去。详见 [`docs/安全与风险.md`](docs/安全与风险.md)。
+> ⚠️ `allowed_wxids` 留空意味着**任何能给这个小号发消息的人**都能触发 AstrBot。如果你的 AstrBot 开了 shell / python 工具，等于把电脑交出去。详见 [`docs/安全与风险.md`](docs/安全与风险.md)。
+
+### AstrBot 端口怎么写
+
+| 写法 | 行为 |
+| --- | --- |
+| `ws://127.0.0.1:6199/ws` | 只用 6199。端口写错时日志会说「端口上没有服务在监听」 |
+| `ws://127.0.0.1/ws`（**省掉端口**） | 先试 11229，再试 6199；哪个在监听就用哪个，并打印实际用的端口 |
+
+推荐省掉端口 —— 换 AstrBot 大版本、或者从别人那抄来一份配置，都不会再撞这个坑。
+
+---
+
+## 杀软（Defender）
+
+`wxhook` 自带三个文件，`faker.exe` 最容易被判为威胁：
+
+```
+<wxhook>\tools\faker.exe          270336 字节
+<wxhook>\tools\start-wechat.exe
+<wxhook>\tools\wxhook.dll
+```
+
+被杀掉之后的症状是微信**根本起不来**，报错埋在 wxhook 内部：
+
+```
+OSError: [WinError 225] 无法成功完成操作，因为文件包含病毒或潜在的垃圾软件。
+FileNotFoundError: [WinError 2] 系统找不到指定的文件。
+```
+
+**管理员 PowerShell** 一次搞定：
+
+```powershell
+Add-MpPreference -ExclusionPath "$env:LOCALAPPDATA\uv\cache"
+Add-MpPreference -ExclusionProcess "faker.exe"
+Add-MpPreference -ExclusionProcess "start-wechat.exe"
+uv cache clean wxhook      # 清掉缓存,下次启动会重新下载
+```
+
+然后重跑 `start.bat`。装的是第三方杀软（360 / 火绒等）就加同样的排除。
+
+`start.bat` 在拉起桥接前会先查这个文件在不在，不在就直接把上面这几行贴在窗口里，不用等到报错。
 
 ---
 
@@ -143,7 +239,10 @@ copy config.example.json config.json
 
 | 现象 | 原因 / 处理 |
 | --- | --- |
-| 提示「当前客户端版本过低」 | 服务端门禁。按 [版本与登录](#提示当前客户端版本过低) 的补丁 + 扫码顺序处理 |
+| `WinError 1225` / 连不上 AstrBot | 端口不对。`astrbot_ob_url` 省掉端口让桥接自己探测，或改成实际端口 |
+| 提示「当前客户端版本过低」 | 两个开关没一起开（会自动补齐）；补齐后按 [扫码顺序](#提示当前客户端版本过低) 扫 |
+| `WinError 225` / 微信起不来 | `faker.exe` 被查杀，见[杀软](#杀软defender) |
+| `Exception: port occupied:19001` | 上次的微信进程还占着端口。启动时会自动清，还不行就手动退出微信 |
 | 群里 `/签到` 之类指令没反应 | `bot_nicknames` 没配，@ 前缀没被剥掉。见 [`docs/设计说明.md`](docs/设计说明.md#1-群里的--分隔符不是空格) |
 | 群里 @ 别人它也回 | 老版本靠文本猜。本仓库用 `atuserlist` 判定，确认你在用最新代码 |
 | `WinError 10043` / 一条消息都收不到 | 上次的注入进程占着 18999，`main.py` 启动时会自动清理 |
@@ -183,6 +282,8 @@ wxhook @ git+https://github.com/miloira/wxhook
 - 群 @ 的权威来源是 `atuserlist`，不是正文里的 `@昵称`
 - 微信 @ 的分隔符是 `U+2005`，不是空格
 - 发文件和发图片都不能发完立刻删源文件 —— wxhook 是异步上传
+- 补丁写只读页前先 `VirtualProtectEx`，写完立刻恢复并逐站点记审计
+- wxhook 的 loguru 日志也接进 `bridge.log` —— 否则 `faker` 成没成功从文件里看不出来
 
 ---
 

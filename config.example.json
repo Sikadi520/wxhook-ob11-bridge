@@ -1,12 +1,20 @@
 {
-  "astrbot_ob_url": "ws://127.0.0.1:11229/ws",
+  "_说明": "JSON 不支持注释,所以用 _开头 的键当说明。它们会被程序忽略,删掉无妨。",
+
+  "_astrbot_ob_url": "AstrBot aiocqhttp 适配器地址,必须带 /ws。不写端口(:/ws)时桥接会自动探测 6199(AstrBot 4.x 默认)和 11229(3.x 默认);WebUI → 平台 → aiocqhttp 里能看到真实端口",
+  "astrbot_ob_url": "ws://127.0.0.1:6199/ws",
   "ws_max_size": 67108864,
 
+  "_门禁": "faked_version 和 patch_x64_to_x32 必须【同时开启】,只开一个都会提示「当前客户端版本过低」。留空或关掉补丁时,启动会自动补齐并在日志里说明。",
   "faked_version": "3.9.12.51",
-  "patch_x64_to_x32": false,
+  "patch_x64_to_x32": true,
   "patch_max_sites": 999,
+  "require_patch_and_faker": true,
 
+  "_self_wxid": "留空即可,登录后自动获取",
   "self_wxid": "",
+
+  "_allowed_wxids": "⚠️ 安全:留空 = 任何能给这个小号发消息的人都能驱动 AstrBot。务必填你自己的主号 wxid,例如 [\"wxid_abcd1234\"]",
   "allowed_wxids": [],
   "bot_nicknames": ["小助手"],
 
